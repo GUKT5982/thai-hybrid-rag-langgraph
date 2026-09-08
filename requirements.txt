@@ -1,0 +1,30 @@
+# Core orchestration
+langgraph>=0.2
+
+# LLM providers (config.py picks one via LLM_PROVIDER)
+langchain-anthropic>=0.2
+langchain-openai>=0.2
+langchain-ollama>=0.2      # LLM_PROVIDER=ollama — local models via a running `ollama serve`, no API key
+
+# Vector store
+psycopg2-binary>=2.9
+pgvector>=0.3
+
+# BM25 + Thai tokenization
+rank-bm25>=0.2.2
+pythainlp>=5.0
+
+# Embeddings + cross-encoder reranker
+sentence-transformers>=3.0
+
+# Data: NEITHER dataset is loaded through the `datasets` library — both
+# miracl/nomiracl and miracl/miracl-corpus still ship a legacy loading
+# script that datasets>=3.0 refuses to run ("Dataset scripts are no longer
+# supported"), confirmed against the live repos. We pull raw files with
+# huggingface_hub.snapshot_download and parse them with pandas/gzip/json
+# instead (see data/download.py, data/loaders.py) — so `datasets` itself
+# is not a dependency here.
+huggingface_hub>=0.24
+pandas>=2.0
+
+python-dotenv>=1.0

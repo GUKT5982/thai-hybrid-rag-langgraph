@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "hybrid_rag": "./graph_studio.py:app"
+  },
+  "env": ".env"
+}
