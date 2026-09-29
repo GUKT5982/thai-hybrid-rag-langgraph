@@ -27,7 +27,7 @@ from data.loaders import load_nomiracl_subset
 from graph import build_graph
 from indexing import PgVectorStore, build_bm25_index, iter_corpus
 from local_vector_store import LocalVectorStore
-from eval.metrics import ndcg_at_k, recall_at_k
+from eval.metrics import error_rate, hallucination_rate, ndcg_at_k, recall_at_k
 from nodes.generate import is_abstain
 
 
@@ -97,16 +97,24 @@ def main() -> None:
                 "retrieved_ids": retrieved_ids,
                 "gold_relevant_ids": sorted(relevant_ids),
                 "recall_at_10": recall_at_k(retrieved_ids, relevant_ids, 10) if relevant_ids else None,
-                "ndcg_at_10": ndcg_at_k(retrieved_ids, gold, 10) if gold else None,
+                # Gate on relevant_ids, not gold: a non_relevant query's gold
+                # is all relevance-0, so its ideal DCG is 0 and ndcg_at_k
+                # returns NaN — which then turned the whole mean into NaN.
+                "ndcg_at_10": ndcg_at_k(retrieved_ids, gold, 10) if relevant_ids else None,
             }
         )
 
     recalls = [r["recall_at_10"] for r in rows if r["recall_at_10"] is not None]
     ndcgs = [r["ndcg_at_10"] for r in rows if r["ndcg_at_10"] is not None]
+    err = error_rate([r["answer"] for r in rows if r["subset"] == "relevant"])
+    halluc = hallucination_rate([r["answer"] for r in rows if r["subset"] == "non_relevant"])
     print("\n=== Mode B results ===")
     print(f"recall@10 (mean over {len(recalls)} relevant-subset queries): "
           f"{sum(recalls) / len(recalls):.3f}" if recalls else "recall@10: n/a")
-    print(f"nDCG@10: {sum(ndcgs) / len(ndcgs):.3f}" if ndcgs else "nDCG@10: n/a")
+    print(f"nDCG@10 (mean over {len(ndcgs)} relevant-subset queries): "
+          f"{sum(ndcgs) / len(ndcgs):.3f}" if ndcgs else "nDCG@10: n/a")
+    print(f"error_rate (relevant): {err:.3f}")
+    print(f"hallucination_rate (non_relevant): {halluc:.3f}  <- read the examples file before trusting this, see docstring")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

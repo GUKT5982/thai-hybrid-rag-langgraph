@@ -128,6 +128,17 @@ it to be slower and less instruction-following-reliable than a hosted
 frontier model (see the real Mode A run below for what that looks like in
 practice).
 
+A cloud-routed Ollama model (e.g. `LLM_MODEL=gemma4:31b-cloud`) goes through
+the same local Ollama daemon and still needs no key in `.env` — just a
+signed-in Ollama install and outbound HTTPS to ollama.com (where that path
+is blocked it fails with a TLS handshake error — that's what stopped it in
+the environment the 2026-09-03 results came from, see `.env.example`).
+Verified 2026-09-29: ~1s per LLM call instead of 10-45s, and far more
+reliable on the Thai-only / citation / `ไม่พบข้อมูล` instructions — see
+"Mode A re-run with a stronger model" below. Make sure the Ollama app (or
+`ollama serve`) is actually running first: `curl
+http://127.0.0.1:11434/api/version`.
+
 Mode A and the newmm ablation need **no Postgres** — start there.
 
 ## Running things, in the order that actually worked
@@ -260,6 +271,57 @@ Mistral/LLAMA-3 hallucinate less but error_rate up to 74.9% — the two
 metrics trade off against each other, which is exactly why both are
 reported here even though error_rate landed at a suspiciously clean 0.)
 
+### Mode A re-run with a stronger model — `gemma4:31b-cloud` via Ollama (2026-09-29)
+
+The re-run the paragraph above asks for. It couldn't happen in the original
+environment — cloud-routed Ollama models failed there with a TLS handshake
+error — but works on a machine with normal outbound HTTPS, through the same
+local Ollama app and `ChatOllama` path, no code changes. 100 `generate()`
+calls took 1m57s (~1.2s each, vs. 10-45s for llama3 on CPU).
+`python -m eval.mode_a --split dev --limit 50`:
+
+| subset | n | metric | llama3 (n=8, above) | gemma4:31b-cloud (n=50) |
+|---|---|---|---|---|
+| relevant | 50 | error_rate | 0.000 | **0.060** (3/50) |
+| non_relevant | 50 | hallucination_rate | 0.750 | **0.520** (26/50) |
+
+Read all 100 answers before reading anything into the 0.520:
+
+1. **No invented facts found.** 0/100 answers cite a doc_id that wasn't in
+   the context, all 100 are in Thai (llama3 often switched to English), and
+   in all 26 non_relevant answers that didn't abstain, every number (years,
+   dates, counts) appears in the passages they cite. The Subaru question
+   llama3 answered "1958" gets a correct `ไม่พบข้อมูล` here.
+2. **Most of those 26 are label misses, not model errors.** 19 give a direct
+   answer; spot-checking 9 of them, the cited passage states the answer
+   outright every time, even though NoMIRACL marks every passage for these
+   queries relevance 0 — e.g. q2301 asks how many provinces อำเภองาว borders
+   and `35128#0` says "ชายแดนติดต่อกันถึงสามจังหวัด"; q2884 correctly chains
+   `218388#0` (คุโรซากิ โอริฮิเมะ = อิโนะอุเอะ โอริฮิเมะ) with `218388#1`
+   ("มีผมสีน้ำตาล"). A few answer a neighboring question instead — q1502 gives
+   the year of บาดาลใจ's first TV adaptation when asked when it was first
+   published — those are the soft errors worth fixing.
+3. **The other 7 hedge without the marker**: "เอกสารไม่ได้ระบุ...อย่างชัดเจน
+   แต่..." followed by related facts, or (q1559) pointing out that two
+   passages contradict each other — which is exactly what the prompt asks
+   for on conflicts. Under the exact-string contract `is_abstain()`
+   correctly counts all 7 as answering.
+4. **The same contract cuts the other way on error_rate.** q65 ("is
+   chlorophyll found only in green leafy vegetables?") gets a correct
+   answer — also in bacteria and algae, `[142149#0]` — but it opens with
+   "ไม่พบข้อมูลว่า...เฉพาะ...", so it's counted as a refusal. Of the other two
+   refusals, q144's relevant-labeled passage never names the first king of
+   Wessex, so refusing there is defensible.
+
+Net: with a model that actually follows instructions, what's left is the
+prompt contract, not fabrication. `GENERATE_SYSTEM_PROMPT` never says what to
+do when the passages hold *related but not answering* information, and "say
+ไม่พบข้อมูล" is satisfied by using the phrase anywhere, in either direction.
+Tightening it (e.g. "start the answer with ไม่พบข้อมูล when the documents
+don't answer the question directly", plus a start-of-answer check in
+`is_abstain()`) is the next prompt change to try — it changes the eval
+contract, so it needs its own before/after run, not a silent edit.
+
 ### Retriever ablation (bm25/vector/hybrid) — real, via `--local-vector`
 
 733 real `dev.relevant` queries, smart-sample corpus, `LocalVectorStore`
@@ -326,15 +388,58 @@ drops any rewritten variant that doesn't share Thai-script characters with
 a Thai original, regardless of what the LLM does. Re-verified after the
 fix: same question, rewritten_queries stayed Thai-only.
 
-### Mode B (full pipeline)
+### Mode B (full pipeline) — first end-to-end run, `gemma4:31b-cloud` (2026-09-29)
 
-Written and import-clean; runnable without Postgres via `--local-vector`
-(`python -m eval.mode_b --mode sample --split dev --limit 30
---local-vector`) — not yet run end-to-end in this session (needs a real
-LLM call per query on top of retrieval; see the Mode A / smoke_graph
-timing notes above for how slow that is with the only local model
-available here). Run it the same way once you have a faster/hosted LLM,
-or accept small `--limit` values with a local one.
+Blocked in the original environment by the only available LLM being a slow
+local one; with `gemma4:31b-cloud` it's ~5s per query.
+`python -m eval.mode_b --mode sample --split dev --limit 30 --local-vector`
+— 30 `relevant` + 30 `non_relevant` queries through the whole graph (the
+non_relevant 30 are the first 30 of Mode A's 50 above), 7 minutes including
+the BM25 rebuild. The vector cache it loads came from `python indexing.py
+--mode sample --local-vector`: 14,732 passages embedded in ~28 min on an
+8-core desktop CPU.
+
+| metric | value |
+|---|---|
+| recall@10 (relevant, n=30) | 0.854 |
+| nDCG@10 (relevant, n=30) | 0.824 |
+| error_rate (relevant, n=30) | 0.200 (6/30) |
+| hallucination_rate (non_relevant, n=30) | 0.533 (16/30) |
+
+`recall@10` / `nDCG@10` are computed over `reranked_docs` — at most
+`RERANK_TOP_K=5` docs, the ones `generate()` actually sees — so they're
+effectively @5, not comparable to the retriever ablation's recall@10 over
+top-10 lists.
+
+The first end-to-end run surfaced a bug: `nDCG@10` printed `nan` on every
+run. A `non_relevant` query's qrels are all relevance 0, so `ndcg_at_k`
+returns NaN for it (ideal DCG is 0), and that NaN went into the mean. Fixed
+by scoring nDCG only for queries that have relevant passages — the same gate
+recall already used. `eval/mode_b.py` also now prints error_rate /
+hallucination_rate, which its docstring talks about but it never computed.
+
+Reading every row that counts against the model:
+
+- **error_rate 0.200 is mostly retrieval — and the model handling it
+  correctly.** Of the 6 relevant queries that abstained, 3 (q77, q136, q144)
+  had recall 0: no gold passage reached `generate()`, so `ไม่พบข้อมูล` was
+  the right answer and the fix is retrieval, not the prompt. 2 (q63, q65)
+  are the marker problem from Mode A: correct content opened with
+  "ไม่พบข้อมูลว่า...". The model never answered a relevant query without a
+  gold passage in its context.
+- **hallucination_rate 0.533 — again no fabrication found.** 0/16 cite a
+  doc outside the retrieved set; the only number missing from its cited
+  passage is q1324's "2503", which is the year from the question. 13 of the
+  16 are questions Mode A also answered from NoMIRACL's own passages (see
+  above). The other 3 flipped from abstaining in Mode A to answering here:
+  - q240 and q1324 are exactly the caveat below — the retriever found a real
+    answer NoMIRACL's passages didn't have: `266749#3` defines สหศึกษา
+    ("โรงเรียนที่เรียนกันระหว่างนักเรียนชายและนักเรียนหญิง"), `80055#0` gives
+    จอมพลสฤษดิ์'s term as 2502–2506 for "who was PM in 2503".
+  - q333 ("is the Mekong in Bangkok?") had the same passage, `13797#0`, both
+    times and gave the same facts both times; Mode A opened with
+    "ไม่พบข้อมูลว่า..." (scored as abstaining), Mode B with "ไม่ใช่" (scored as
+    a hallucination). Same contract problem as Mode A's point 4.
 
 ### Mode B interpretation caveat
 
